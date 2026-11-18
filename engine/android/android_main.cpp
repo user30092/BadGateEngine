@@ -9,5 +9,6 @@
 void android_main(android_app* app) {
     mc::android::AndroidPlatform platform(app);
     mc::Engine engine;
+    engine->ShowTouchControls() = true;
     mc::runMainLoop(platform, engine);
 }

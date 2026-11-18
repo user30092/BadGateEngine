@@ -44,6 +44,7 @@ enum class Action {
     KeyDone,
     KeyCancel,
     ToggleDebug,
+    ToggleFlying,
 };
 
 struct TextEntryState {

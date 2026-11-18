@@ -509,6 +509,10 @@ void Engine::handleAction(const MenuButton& btn) {
             toggleDebug();
             break;
 
+        case Action::ToggleFlying:
+            toggleFlying();
+            break;
+
         case Action::OpenTextEntry:
             openTextEntry(static_cast<TextField>(btn.payload));
             break;
@@ -735,10 +739,12 @@ void Engine::renderPausedFrame() {
 
 void Engine::renderGameFrame(float dt) {
     float pad = 24.0f, btnSize = 110.0f;
+    flyBtn   = Rect{gl.width() - btnSize * 2 - pad * 2,         gl.height() - btnSize * 2 - pad * 2, btnSize, btnSize};
     jumpBtn  = Rect{gl.width() - btnSize - pad,         gl.height() - btnSize * 2 - pad * 2, btnSize, btnSize};
     breakBtn = Rect{gl.width() - btnSize * 2 - pad * 2, gl.height() - btnSize - pad,         btnSize, btnSize};
     placeBtn = Rect{gl.width() - btnSize - pad,         gl.height() - btnSize - pad,         btnSize, btnSize};
     pauseBtn = Rect{pad, pad, 140.0f, 70.0f};
+    input.setFlyButton(flyBtn);
     input.setJumpButton(jumpBtn);
     input.setBreakButton(breakBtn);
     input.setPlaceButton(placeBtn);
@@ -822,10 +828,11 @@ void Engine::renderGameFrame(float dt) {
     uiRenderer.drawCrosshair(gl.width(), gl.height());
     uiRenderer.drawHotbar(gl.width(), gl.height(), input.hotbarSlot(), 5);
 
-    if (kShowTouchControls) {
+    if (ShowTouchControls()) {
         Vec2 joyCenter{gl.width() * 0.2f, gl.height() * 0.7f};
         Vec2 knob = joyCenter + input.moveAxis() * 120.0f;
         uiRenderer.drawJoystick(joyCenter, knob, 150.0f, true);
+        uiRenderer.drawButton(flyBtn,  "FLY", false);
         uiRenderer.drawButton(jumpBtn,  "JMP", false);
         uiRenderer.drawButton(breakBtn, "HIT", false);
         uiRenderer.drawButton(placeBtn, "PUT", false);

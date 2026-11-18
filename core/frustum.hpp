@@ -1,5 +1,5 @@
 #pragma once
-#include <cmath>             // std::sqrt в Plane::normalize
+#include <cmath>
 #include "math.hpp"
 #include "types.hpp"
 
@@ -34,8 +34,6 @@ struct AABB {
 
 class Frustum {
 public:
-    // Gribb–Hartmann: извлекаем 6 плоскостей из viewProj (column-major).
-    // Элемент (row, col) = m[col*4 + row].
     void extractFrom(const Mat4& vp) {
         auto row = [&](int r) -> Vec4 {
             return { vp.m[r], vp.m[4 + r], vp.m[8 + r], vp.m[12 + r] };
@@ -45,7 +43,6 @@ public:
         const Vec4 r3 = row(2);
         const Vec4 r4 = row(3);
 
-        // OpenGL-style clip space: z ∈ [-1, 1]
         planes[0] = { r4.x + r1.x, r4.y + r1.y, r4.z + r1.z, r4.w + r1.w }; // left
         planes[1] = { r4.x - r1.x, r4.y - r1.y, r4.z - r1.z, r4.w - r1.w }; // right
         planes[2] = { r4.x + r2.x, r4.y + r2.y, r4.z + r2.z, r4.w + r2.w }; // bottom
@@ -56,8 +53,7 @@ public:
         for (auto& p : planes) p.normalize();
     }
 
-    // Conservative-тест AABB против всех плоскостей.
-    // false — AABB гарантированно снаружи.
+
     bool intersects(const AABB& box) const {
         for (const auto& p : planes) {
             float px = (p.a >= 0) ? box.max.x : box.min.x;

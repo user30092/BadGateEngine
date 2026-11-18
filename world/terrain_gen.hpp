@@ -19,33 +19,36 @@ class TerrainGenerator {
 public:
     explicit TerrainGenerator(uint32_t seed) : seed(seed) {}
 
+    // Внешний API: приблизительная высота поверхности (Alpha-стиль).
     int heightAt(int wx, int wz) const {
-        return heightAtUncached(wx, wz);
+        return accurateSurfaceHeight(wx, wz);
     }
 
     void generate(Chunk& chunk) {
         const int baseX = chunk.chunkX() * CHUNK_SIZE;
         const int baseZ = chunk.chunkZ() * CHUNK_SIZE;
 
-        // Кэш высот/биомов с запасом под деревья из соседних чанков.
         HeightCache cache(baseX, baseZ);
 
+        // 1) Основной рельеф через 3D-плотность (Alpha)
         for (int x = 0; x < CHUNK_SIZE; ++x) {
             for (int z = 0; z < CHUNK_SIZE; ++z) {
-                const int wx = baseX + x;
-                const int wz = baseZ + z;
-
-                const ColumnInfo info = cachedColumn(cache, wx, wz);
-
-                generateColumnFast(chunk, x, z, wx, wz, info.height, info.biome);
+                generateColumnAlpha(chunk, x, z, baseX + x, baseZ + z);
             }
         }
 
+        // 2) Пещеры — Perlin worms (Alpha)
+        carveWorms(chunk, baseX, baseZ);
+
+        // 3) Руда по классическим уровням Alpha
         placeOresForChunk(chunk, baseX, baseZ);
+
+        // 4) Деревья
         placeTreesForChunk(chunk, cache, baseX, baseZ);
     }
 
-    static constexpr int WATER_LEVEL = 32;
+    // Alpha sea level = 64
+    static constexpr int WATER_LEVEL = 64;
 
 private:
     enum class Biome {
@@ -61,7 +64,6 @@ private:
     // -------------------------------------------------------------------------
     // Block IDs
     // -------------------------------------------------------------------------
-
     static constexpr BlockId AIR           = 0;
     static constexpr BlockId GRASS         = 1;
     static constexpr BlockId DIRT          = 2;
@@ -83,20 +85,33 @@ private:
     static constexpr BlockId CLAY          = 17;
 
     // -------------------------------------------------------------------------
-    // Performance knobs
+    // Alpha-style параметры
     // -------------------------------------------------------------------------
+    static constexpr float TERRAIN_XZ_SCALE = 0.045f;   // 1 блок ≈ 22 блока мира
+    static constexpr float TERRAIN_Y_SCALE  = 0.0625f;  // 1/16
+    static constexpr float TERRAIN_SLOPE_DIV = 10.0f;   // ширина перехода
+    static constexpr float TERRAIN_NOISE_AMP = 1.0f;    // амплитуда нависаний
 
-    // Чем больше значение, тем быстрее, но тем грубее пещеры.
-    // Для слабого Android/старого ПК можно поставить 5 или 6.
-    static constexpr int CAVE_STEP_XZ = 4;
-    static constexpr int CAVE_STEP_Y  = 4;
+    // Perlin worms
+    static constexpr int   WORM_CELL        = 32;   // сетка спавна червей
+    static constexpr int   WORM_CHANCE      = 5;    // 1 из 5 ячеек
+    static constexpr int   WORM_SEARCH      = 120;  // радиус поиска
+    static constexpr int   WORM_MIN_LEN     = 60;
+    static constexpr int   WORM_MAX_LEN     = 140;
+    static constexpr float WORM_MIN_RADIUS  = 1.2f;
+    static constexpr float WORM_MAX_RADIUS  = 2.4f;
+    static constexpr float WORM_STEP        = 0.6f;
+    static constexpr int   WORM_MIN_Y       = 6;
+    static constexpr int   WORM_MAX_Y       = 60;
 
+    // Деревья
     static constexpr int TREE_CELL  = 7;
     static constexpr int MAX_CANOPY = 3;
-    static constexpr int SNOW_LINE  = 78;
+    static constexpr int SNOW_LINE  = 92;   // Alpha-высокие горы
+    static constexpr int MOUNTAIN_LINE = 82;
 
     static constexpr int CACHE_MARGIN = MAX_CANOPY + TREE_CELL + 4;
-    static constexpr int CACHE_SIZE = CHUNK_SIZE + CACHE_MARGIN * 2;
+    static constexpr int CACHE_SIZE   = CHUNK_SIZE + CACHE_MARGIN * 2;
 
     struct ColumnInfo {
         int height;
@@ -119,7 +134,6 @@ private:
     // -------------------------------------------------------------------------
     // Utils
     // -------------------------------------------------------------------------
-
     static float clamp01(float v) {
         return std::max(0.0f, std::min(1.0f, v));
     }
@@ -144,44 +158,32 @@ private:
     static int cacheIndex(int wx, int wz, int baseX, int baseZ) {
         int lx = wx - baseX + CACHE_MARGIN;
         int lz = wz - baseZ + CACHE_MARGIN;
-
-        if (lx < 0 || lx >= CACHE_SIZE || lz < 0 || lz >= CACHE_SIZE) {
-            return -1;
-        }
-
+        if (lx < 0 || lx >= CACHE_SIZE || lz < 0 || lz >= CACHE_SIZE) return -1;
         return lz * CACHE_SIZE + lx;
     }
 
     ColumnInfo cachedColumn(HeightCache& cache, int wx, int wz) const {
         int idx = cacheIndex(wx, wz, cache.baseX, cache.baseZ);
-
         if (idx >= 0) {
             ColumnInfo& c = cache.data[idx];
-
             if (c.height < 0) {
-                int h = heightAtUncached(wx, wz);
-                c.height = h;
-                c.biome = biomeAt(wx, wz, h);
+                c.height = accurateSurfaceHeight(wx, wz);
+                c.biome  = biomeAt(wx, wz, c.height);
             }
-
             return c;
         }
-
-        int h = heightAtUncached(wx, wz);
+        int h = accurateSurfaceHeight(wx, wz);
         return ColumnInfo{h, biomeAt(wx, wz, h)};
     }
 
     // -------------------------------------------------------------------------
     // Noise
     // -------------------------------------------------------------------------
-
     float valueNoise2(float x, float z, uint32_t s) const {
         int xi = fastFloor(x);
         int zi = fastFloor(z);
-
         float xf = x - xi;
         float zf = z - zi;
-
         float u = xf * xf * (3.0f - 2.0f * xf);
         float v = zf * zf * (3.0f - 2.0f * zf);
 
@@ -192,7 +194,6 @@ private:
 
         float top = a + (b - a) * u;
         float bot = c + (d - c) * u;
-
         return top + (bot - top) * v;
     }
 
@@ -200,11 +201,9 @@ private:
         int xi = fastFloor(x);
         int yi = fastFloor(y);
         int zi = fastFloor(z);
-
         float xf = x - xi;
         float yf = y - yi;
         float zf = z - zi;
-
         float u = xf * xf * (3.0f - 2.0f * xf);
         float v = yf * yf * (3.0f - 2.0f * yf);
         float w = zf * zf * (3.0f - 2.0f * zf);
@@ -222,101 +221,90 @@ private:
         float c10 = c010 + (c110 - c010) * u;
         float c01 = c001 + (c101 - c001) * u;
         float c11 = c011 + (c111 - c011) * u;
-
         float c0 = c00 + (c10 - c00) * v;
         float c1 = c01 + (c11 - c01) * v;
-
         return c0 + (c1 - c0) * w;
     }
 
-    float fbm2(float x, float z, uint32_t s, int octaves, float persistence) const {
-        float total = 0.0f;
-        float amp = 1.0f;
-        float maxAmp = 0.0f;
+    // -------------------------------------------------------------------------
+    // Base height (2D) — «холмистость/континент»
+    // -------------------------------------------------------------------------
+    float computeBaseHeight(int wx, int wz) const {
+        float continent = valueNoise2(wx * 0.0015f, wz * 0.0015f, seed + 100);
+        // [0..1]; смещаем так, чтобы ~45% ниже sea level 64
+        float base = 28.0f + continent * 78.0f;   // [28, 106], avg ~67
 
-        float fx = x;
-        float fz = z;
+        float hills = valueNoise2(wx * 0.008f, wz * 0.008f, seed + 101);
+        base += (hills - 0.5f) * 16.0f;
 
-        for (int i = 0; i < octaves; ++i) {
-            total += valueNoise2(fx, fz, s + static_cast<uint32_t>(i) * 131u) * amp;
-            maxAmp += amp;
-
-            amp *= persistence;
-            fx *= 2.0f;
-            fz *= 2.0f;
+        // Горы (Alpha: высокие горы при высоком continent)
+        float mountMask = smoothstep(0.55f, 0.80f, continent);
+        if (mountMask > 0.0f) {
+            float ridge = valueNoise2(wx * 0.020f, wz * 0.020f, seed + 102);
+            ridge = 1.0f - std::fabs(ridge * 2.0f - 1.0f);
+            ridge *= ridge;
+            base += mountMask * (8.0f + ridge * 28.0f);
         }
 
-        return total / maxAmp;
+        // Озёра
+        float lakeNoise = valueNoise2(wx * 0.006f, wz * 0.006f, seed + 103);
+        float lakeMask  = smoothstep(0.65f, 0.85f, lakeNoise);
+        base -= lakeMask * 16.0f;
+
+        if (base < 10.0f) base = 10.0f;
+        if (base > CHUNK_HEIGHT - 20) base = CHUNK_HEIGHT - 20;
+        return base;
     }
 
     // -------------------------------------------------------------------------
-    // Height / biome
+    // 3D-плотность (Alpha): > 0 — камень, < 0 — воздух
     // -------------------------------------------------------------------------
+    float densityAt(int wx, int wy, int wz, float baseH) const {
+        // Нависающие структуры — 2 октавы value-noise 3D
+        float n1 = valueNoise3(wx * TERRAIN_XZ_SCALE,
+                               wy * TERRAIN_Y_SCALE,
+                               wz * TERRAIN_XZ_SCALE,
+                               seed + 200);
+        float n2 = valueNoise3(wx * TERRAIN_XZ_SCALE * 2.3f,
+                               wy * TERRAIN_Y_SCALE * 1.8f,
+                               wz * TERRAIN_XZ_SCALE * 2.3f,
+                               seed + 201);
 
-    int heightAtUncached(int wx, int wz) const {
-        // Уменьшил количество октав относительно предыдущей версии.
-        float continent = fbm2(wx * 0.0022f, wz * 0.0022f, seed + 11, 3, 0.52f);
-        float hills     = fbm2(wx * 0.0100f, wz * 0.0100f, seed + 12, 3, 0.50f);
-        float rough     = valueNoise2(wx * 0.0350f, wz * 0.0350f, seed + 13);
+        float noiseVal = (n1 * 0.7f + n2 * 0.3f - 0.5f) * 2.0f;   // [-1, 1]
 
-        float mountainNoise = fbm2(wx * 0.0060f, wz * 0.0060f, seed + 14, 3, 0.50f);
-        float mountainMask = smoothstep(0.50f, 0.78f, mountainNoise);
+        // Наклон: положительный внутри земли, отрицательный выше
+        float slope = (baseH - static_cast<float>(wy)) / TERRAIN_SLOPE_DIV;
 
-        float ridgeBase = valueNoise2(wx * 0.0180f, wz * 0.0180f, seed + 15);
-        float ridge = 1.0f - std::fabs(ridgeBase * 2.0f - 1.0f);
-        ridge *= ridge;
-
-        float lakeNoise = valueNoise2(wx * 0.0075f, wz * 0.0075f, seed + 16);
-        float lakeMask = smoothstep(0.60f, 0.82f, lakeNoise);
-
-        float h = 18.0f;
-
-        h += (continent - 0.45f) * 38.0f;
-        h += (hills - 0.45f) * 24.0f;
-        h += (rough - 0.5f) * 7.0f;
-        h += mountainMask * (18.0f + ridge * 40.0f);
-        h -= lakeMask * 12.0f;
-
-        if (mountainMask > 0.55f && rough > 0.58f) {
-            h = std::floor(h * 0.5f) * 2.0f;
-        }
-
-        int result = static_cast<int>(h);
-
-        if (result < 4) result = 4;
-        if (result >= CHUNK_HEIGHT - 8) result = CHUNK_HEIGHT - 8;
-
-        return result;
+        return slope + noiseVal * TERRAIN_NOISE_AMP;
     }
 
+    int accurateSurfaceHeight(int wx, int wz) const {
+        float baseH = computeBaseHeight(wx, wz);
+        int startY = std::min(CHUNK_HEIGHT - 1, static_cast<int>(baseH) + 20);
+        for (int y = startY; y >= 4; --y) {
+            if (densityAt(wx, y, wz, baseH) > 0.0f) return y;
+        }
+        return 4;
+    }
+
+    // -------------------------------------------------------------------------
+    // Biomes — температура + влажность (Alpha lookup)
+    // -------------------------------------------------------------------------
     Biome biomeAt(int wx, int wz, int height) const {
-        if (height < WATER_LEVEL - 1) {
-            return Biome::Ocean;
-        }
+        if (height < WATER_LEVEL - 1) return Biome::Ocean;
+        if (height <= WATER_LEVEL + 1) return Biome::Beach;
 
-        if (height <= WATER_LEVEL + 1) {
-            return Biome::Beach;
-        }
+        if (height >= SNOW_LINE) return Biome::Snowy;
+        if (height >= MOUNTAIN_LINE) return Biome::Mountains;
 
-        if (height > SNOW_LINE) {
-            return Biome::Snowy;
-        }
+        float temp  = valueNoise2(wx * 0.0040f, wz * 0.0040f, seed + 301);
+        float humid = valueNoise2(wx * 0.0055f, wz * 0.0055f, seed + 302);
 
-        float temp = valueNoise2(wx * 0.0040f, wz * 0.0040f, seed + 201);
-        float humid = valueNoise2(wx * 0.0055f, wz * 0.0055f, seed + 202);
-        float rock = valueNoise2(wx * 0.0080f, wz * 0.0080f, seed + 203);
+        // Hot + dry → пустыня
+        if (temp > 0.60f && humid < 0.42f) return Biome::Desert;
 
-        if (height > 62 && rock > 0.48f) {
-            return Biome::Mountains;
-        }
-
-        if (temp > 0.62f && humid < 0.42f) {
-            return Biome::Desert;
-        }
-
-        if (humid > 0.54f) {
-            return Biome::Forest;
-        }
+        // Влажно → лес
+        if (humid > 0.54f) return Biome::Forest;
 
         return Biome::Plains;
     }
@@ -326,191 +314,22 @@ private:
     }
 
     // -------------------------------------------------------------------------
-    // Fast caves
+    // Генерация колонки через 3D-плотность
     // -------------------------------------------------------------------------
+    void generateColumnAlpha(Chunk& chunk, int lx, int lz, int wx, int wz) const {
+        float baseH = computeBaseHeight(wx, wz);
 
-    bool cavePoint(int gx, int gy, int gz) const {
-        // gx/gy/gz — координаты грубой сетки, не мировые блоки.
-        // Переводим в мир.
-        int wx = gx * CAVE_STEP_XZ;
-        int wy = gy * CAVE_STEP_Y;
-        int wz = gz * CAVE_STEP_XZ;
+        const int approx = static_cast<int>(baseH);
+        const int minY   = std::max(0, approx - 20);
+        const int maxY   = std::min(CHUNK_HEIGHT, approx + 20);
 
-        if (wy <= 4) return false;
+        int surfaceY = -1;
 
-        float n1 = valueNoise3(
-            wx * 0.035f,
-            wy * 0.050f,
-            wz * 0.035f,
-            seed + 301
-        );
-
-        float n2 = valueNoise3(
-            wx * 0.035f + 41.7f,
-            wy * 0.050f - 19.3f,
-            wz * 0.035f + 73.1f,
-            seed + 302
-        );
-
-        bool spaghetti =
-            std::fabs(n1 - 0.5f) < 0.040f &&
-            std::fabs(n2 - 0.5f) < 0.040f;
-
-        bool cavern = false;
-
-        if (wy < 58) {
-            float cheese = valueNoise3(
-                wx * 0.018f,
-                wy * 0.026f,
-                wz * 0.018f,
-                seed + 303
-            );
-
-            cavern = cheese > 0.735f;
-        }
-
-        return spaghetti || cavern;
-    }
-
-    void carveCavesFast(Chunk& chunk,
-                        int lx,
-                        int lz,
-                        int wx,
-                        int wz,
-                        int surf) const {
-        if (surf <= 8) return;
-
-        const int maxY = std::min(surf - 5, CHUNK_HEIGHT - 1);
-
-        if (maxY <= 5) return;
-
-        const int gx = floorDiv(wx, CAVE_STEP_XZ);
-        const int gz = floorDiv(wz, CAVE_STEP_XZ);
-
-        const int rx = wx - gx * CAVE_STEP_XZ;
-        const int rz = wz - gz * CAVE_STEP_XZ;
-
-        // Быстрый bilinear по 4 углам cave-cell.
-        const float tx = static_cast<float>(rx) / CAVE_STEP_XZ;
-        const float tz = static_cast<float>(rz) / CAVE_STEP_XZ;
-
-        const float ix0 = 1.0f - tx;
-        const float ix1 = tx;
-        const float iz0 = 1.0f - tz;
-        const float iz1 = tz;
-
-        const float w00 = ix0 * iz0;
-        const float w10 = ix1 * iz0;
-        const float w01 = ix0 * iz1;
-        const float w11 = ix1 * iz1;
-
-        int gy0 = 5 / CAVE_STEP_Y;
-        int gy1 = maxY / CAVE_STEP_Y + 1;
-
-        for (int gy = gy0; gy <= gy1; ++gy) {
-            int y0 = gy * CAVE_STEP_Y;
-            int y1 = y0 + CAVE_STEP_Y - 1;
-
-            int fromY = std::max(5, y0);
-            int toY = std::min(maxY, y1);
-
-            if (fromY > toY) continue;
-
-            bool c00 = cavePoint(gx,     gy, gz);
-            bool c10 = cavePoint(gx + 1, gy, gz);
-            bool c01 = cavePoint(gx,     gy, gz + 1);
-            bool c11 = cavePoint(gx + 1, gy, gz + 1);
-
-            float density =
-                (c00 ? w00 : 0.0f) +
-                (c10 ? w10 : 0.0f) +
-                (c01 ? w01 : 0.0f) +
-                (c11 ? w11 : 0.0f);
-
-            // Порог влияет на толщину пещер.
-            // 0.45 — больше пещер.
-            // 0.60 — меньше пещер и быстрее визуально чище.
-            if (density < 0.52f) continue;
-
-            for (int y = fromY; y <= toY; ++y) {
-                BlockId id = chunk.get(lx, y, lz);
-
-                if (id == STONE ||
-                    id == DIRT ||
-                    id == SAND ||
-                    id == SANDSTONE ||
-                    id == GRAVEL ||
-                    id == COAL_ORE ||
-                    id == IRON_ORE ||
-                    id == GOLD_ORE ||
-                    id == REDSTONE_ORE ||
-                    id == DIAMOND_ORE ||
-                    id == CLAY) {
-                    chunk.set(lx, y, lz, AIR);
-                }
-            }
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Column generation
-    // -------------------------------------------------------------------------
-
-    void generateColumnFast(Chunk& chunk,
-                            int lx,
-                            int lz,
-                            int wx,
-                            int wz,
-                            int surf,
-                            Biome biome) const {
-        const bool underwater = surf <= WATER_LEVEL;
-
-        BlockId topBlock = GRASS;
-        BlockId fillBlock = DIRT;
-        BlockId deepFillBlock = STONE;
-
-        switch (biome) {
-            case Biome::Desert:
-            case Biome::Beach:
-            case Biome::Ocean:
-                topBlock = SAND;
-                fillBlock = SAND;
-                deepFillBlock = SANDSTONE;
-                break;
-
-            case Biome::Mountains:
-                topBlock = STONE;
-                fillBlock = STONE;
-                deepFillBlock = STONE;
-                break;
-
-            case Biome::Snowy:
-                topBlock = SNOW;
-                fillBlock = DIRT;
-                deepFillBlock = STONE;
-                break;
-
-            case Biome::Forest:
-            case Biome::Plains:
-            default:
-                topBlock = GRASS;
-                fillBlock = DIRT;
-                deepFillBlock = STONE;
-                break;
-        }
-
-        // Сначала воздух.
-        for (int y = 0; y < CHUNK_HEIGHT; ++y) {
-            chunk.set(lx, y, lz, AIR);
-        }
-
-        // Бедрок.
+        // Бедрок
         chunk.set(lx, 0, lz, BEDROCK);
-
         for (int y = 1; y <= 3; ++y) {
             uint32_t h = hash3(wx, y, wz, seed + 520);
             int chance = 80 - y * 20;
-
             if (static_cast<int>(h % 100) < chance) {
                 chunk.set(lx, y, lz, BEDROCK);
             } else {
@@ -518,104 +337,206 @@ private:
             }
         }
 
-        // Глубокий камень.
-        int deepEnd = std::min(surf - 8, CHUNK_HEIGHT);
-        for (int y = 4; y < deepEnd; ++y) {
+        // Глубокий камень (ниже зоны перехода)
+        for (int y = 4; y < minY; ++y) {
             chunk.set(lx, y, lz, STONE);
+            surfaceY = y;
         }
 
-        // Средний слой.
-        int midStart = std::max(4, surf - 8);
-        int midEnd = std::min(surf - 4, CHUNK_HEIGHT);
-
-        for (int y = midStart; y < midEnd; ++y) {
-            if (deepFillBlock == STONE) {
+        // 3D-плотность
+        for (int y = minY; y < maxY; ++y) {
+            float d = densityAt(wx, y, wz, baseH);
+            if (d > 0.0f) {
                 chunk.set(lx, y, lz, STONE);
+                surfaceY = y;
             } else {
-                chunk.set(lx, y, lz, deepFillBlock);
+                chunk.set(lx, y, lz, AIR);
             }
         }
 
-        // Верхний fill.
-        int fillStart = std::max(4, surf - 4);
-        int fillEnd = std::min(surf - 1, CHUNK_HEIGHT);
-
-        for (int y = fillStart; y < fillEnd; ++y) {
-            chunk.set(lx, y, lz, fillBlock);
+        // Всё выше — воздух
+        for (int y = maxY; y < CHUNK_HEIGHT; ++y) {
+            chunk.set(lx, y, lz, AIR);
         }
 
-        // Top block.
-        if (surf - 1 > 3 && surf - 1 < CHUNK_HEIGHT) {
-            BlockId top = underwater ? SAND : topBlock;
-
-            if (underwater && surf >= WATER_LEVEL - 4) {
-                float shorePatch = valueNoise2(wx * 0.08f, wz * 0.08f, seed + 510);
-
-                if (shorePatch > 0.72f) {
-                    top = CLAY;
-                } else if (shorePatch < 0.18f) {
-                    top = GRAVEL;
-                }
-            }
-
-            if (isMountainLike(biome)) {
-                float exposedRock = valueNoise2(wx * 0.09f, wz * 0.09f, seed + 530);
-
-                if (exposedRock > 0.58f && surf > WATER_LEVEL + 4) {
-                    top = STONE;
-                }
-            }
-
-            chunk.set(lx, surf - 1, lz, top);
+        // Поверхностные блоки
+        if (surfaceY > 3 && surfaceY < CHUNK_HEIGHT) {
+            applySurfaceRules(chunk, lx, lz, wx, wz, surfaceY);
         }
 
-        // Вода.
-        if (underwater) {
-            int waterStart = std::max(surf, 4);
+        // Вода (Alpha)
+        if (surfaceY < WATER_LEVEL) {
             int waterEnd = std::min(WATER_LEVEL + 1, CHUNK_HEIGHT);
-
-            for (int y = waterStart; y < waterEnd; ++y) {
-                chunk.set(lx, y, lz, WATER);
+            for (int y = surfaceY + 1; y < waterEnd; ++y) {
+                if (chunk.get(lx, y, lz) == AIR) {
+                    chunk.set(lx, y, lz, WATER);
+                }
             }
         }
-
-        // Гравийные карманы дешёво: не на каждый блок, а редкими пятнами.
-        addGravelPockets(chunk, lx, lz, wx, wz, surf);
-
-        // Пещеры после заполнения столба.
-        carveCavesFast(chunk, lx, lz, wx, wz, surf);
     }
 
-    void addGravelPockets(Chunk& chunk,
-                          int lx,
-                          int lz,
-                          int wx,
-                          int wz,
-                          int surf) const {
-        if (surf < 16) return;
+    void applySurfaceRules(Chunk& chunk, int lx, int lz, int wx, int wz, int surfaceY) const {
+        const bool underwater = surfaceY <= WATER_LEVEL;
+        Biome biome = biomeAt(wx, wz, surfaceY);
 
-        // Проверяем только несколько глубин, а не весь столб.
-        float patch = valueNoise2(wx * 0.045f, wz * 0.045f, seed + 501);
+        BlockId topBlock = GRASS;
+        BlockId fillBlock = DIRT;
 
-        if (patch < 0.76f) return;
+        switch (biome) {
+            case Biome::Desert:
+            case Biome::Beach:
+            case Biome::Ocean:
+                topBlock = SAND;
+                fillBlock = SAND;
+                break;
+            case Biome::Mountains:
+                topBlock = STONE;
+                fillBlock = STONE;
+                break;
+            case Biome::Snowy:
+                topBlock = SNOW;
+                fillBlock = DIRT;
+                break;
+            case Biome::Forest:
+            case Biome::Plains:
+            default:
+                break;
+        }
 
-        int centerY = 8 + static_cast<int>(hash3(wx, 0, wz, seed + 502) % static_cast<uint32_t>(std::max(1, surf - 16)));
-        int radius = 2;
+        if (underwater) {
+            topBlock = SAND;
+            fillBlock = SAND;
 
-        int fromY = std::max(5, centerY - radius);
-        int toY = std::min(surf - 6, centerY + radius);
+            float patch = valueNoise2(wx * 0.08f, wz * 0.08f, seed + 510);
+            if (patch > 0.72f) topBlock = CLAY;
+            else if (patch < 0.18f) topBlock = GRAVEL;
+        }
 
-        for (int y = fromY; y <= toY; ++y) {
+        if (isMountainLike(biome) && surfaceY > WATER_LEVEL + 4) {
+            float exposed = valueNoise2(wx * 0.09f, wz * 0.09f, seed + 530);
+            if (exposed > 0.58f) topBlock = STONE;
+        }
+
+        chunk.set(lx, surfaceY, lz, topBlock);
+
+        for (int dy = 1; dy <= 4; ++dy) {
+            int y = surfaceY - dy;
+            if (y <= 3) break;
             if (chunk.get(lx, y, lz) == STONE) {
-                chunk.set(lx, y, lz, GRAVEL);
+                chunk.set(lx, y, lz, fillBlock);
             }
         }
     }
 
     // -------------------------------------------------------------------------
-    // Fast ores
+    // Perlin worms (Alpha-пещеры)
     // -------------------------------------------------------------------------
+    void carveWorms(Chunk& chunk, int baseX, int baseZ) const {
+        int cellMinX = floorDiv(baseX - WORM_SEARCH, WORM_CELL);
+        int cellMaxX = floorDiv(baseX + CHUNK_SIZE + WORM_SEARCH, WORM_CELL);
+        int cellMinZ = floorDiv(baseZ - WORM_SEARCH, WORM_CELL);
+        int cellMaxZ = floorDiv(baseZ + CHUNK_SIZE + WORM_SEARCH, WORM_CELL);
 
+        for (int cx = cellMinX; cx <= cellMaxX; ++cx) {
+            for (int cz = cellMinZ; cz <= cellMaxZ; ++cz) {
+                uint32_t h = hash3(cx, 0, cz, seed + 400);
+                if (static_cast<int>(h % WORM_CHANCE) != 0) continue;
+
+                // Начальная позиция
+                float wx = static_cast<float>(cx * WORM_CELL)
+                         + static_cast<float>((h >> 0) & 0xFF) * WORM_CELL / 256.0f;
+                float wz = static_cast<float>(cz * WORM_CELL)
+                         + static_cast<float>((h >> 8) & 0xFF) * WORM_CELL / 256.0f;
+                float wy = static_cast<float>(WORM_MIN_Y)
+                         + static_cast<float>((h >> 16) & 0x3F) / 63.0f
+                         * static_cast<float>(WORM_MAX_Y - WORM_MIN_Y);
+
+                // Направление
+                float dx = static_cast<float>((h >> 22) & 0x3FF) / 511.5f - 1.0f;
+                float dy = static_cast<float>((h >> 12) & 0x3FF) / 511.5f - 1.0f;
+                float dz = static_cast<float>((h >> 2)  & 0x3FF) / 511.5f - 1.0f;
+                float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (len < 1e-4f) { dx = 1.0f; dy = 0.0f; dz = 0.0f; len = 1.0f; }
+                dx /= len; dy = dy / len * 0.35f; dz /= len;
+                len = std::sqrt(dx * dx + dy * dy + dz * dz);
+                dx /= len; dy /= len; dz /= len;
+
+                int wormLen = WORM_MIN_LEN + static_cast<int>((h >> 8) & 0x7F) % (WORM_MAX_LEN - WORM_MIN_LEN);
+                float baseR = WORM_MIN_RADIUS
+                            + static_cast<float>((h >> 24) & 0xF) / 15.0f
+                            * (WORM_MAX_RADIUS - WORM_MIN_RADIUS);
+
+                // Толщина варьируется по длине
+                uint32_t saltA = seed + 401;
+                uint32_t saltB = seed + 402;
+
+                for (int step = 0; step < wormLen; ++step) {
+                    float t = static_cast<float>(step) / static_cast<float>(wormLen);
+                    float radius = baseR * (0.7f + 0.5f * std::sin(t * 6.2831f * 2.0f));
+
+                    carveWormSphere(chunk, baseX, baseZ, wx, wy, wz, radius);
+
+                    // Возмущение направления (Perlin)
+                    float p1 = valueNoise3(static_cast<float>(step) * 0.08f, 0.0f, 0.0f, saltA);
+                    float p2 = valueNoise3(static_cast<float>(step) * 0.08f, 11.0f, 0.0f, saltA);
+                    float p3 = valueNoise3(static_cast<float>(step) * 0.08f, 22.0f, 0.0f, saltB);
+
+                    dx += (p1 - 0.5f) * 0.40f;
+                    dy += (p2 - 0.5f) * 0.25f;
+                    dz += (p3 - 0.5f) * 0.40f;
+
+                    float l2 = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (l2 > 1e-4f) { dx /= l2; dy /= l2; dz /= l2; }
+
+                    wx += dx * WORM_STEP;
+                    wy += dy * WORM_STEP;
+                    wz += dz * WORM_STEP;
+
+                    if (wy < static_cast<float>(WORM_MIN_Y)) wy = static_cast<float>(WORM_MIN_Y);
+                    if (wy > static_cast<float>(WORM_MAX_Y)) wy = static_cast<float>(WORM_MAX_Y);
+                }
+            }
+        }
+    }
+
+    void carveWormSphere(Chunk& chunk, int baseX, int baseZ,
+                         float fwx, float fwy, float fwz,
+                         float radius) const {
+        int cx = static_cast<int>(std::floor(fwx));
+        int cy = static_cast<int>(std::floor(fwy));
+        int cz = static_cast<int>(std::floor(fwz));
+        int r  = static_cast<int>(std::ceil(radius));
+        int r2 = r * r;
+
+        for (int dy = -r; dy <= r; ++dy) {
+            int y = cy + dy;
+            if (y < 4 || y >= CHUNK_HEIGHT) continue;
+
+            for (int dz = -r; dz <= r; ++dz) {
+                int lz = cz + dz - baseZ;
+                if (lz < 0 || lz >= CHUNK_SIZE) continue;
+
+                for (int dx = -r; dx <= r; ++dx) {
+                    if (dx * dx + dy * dy + dz * dz > r2) continue;
+
+                    int lx = cx + dx - baseX;
+                    if (lx < 0 || lx >= CHUNK_SIZE) continue;
+
+                    BlockId id = chunk.get(lx, y, lz);
+                    if (id == STONE || id == DIRT || id == GRASS ||
+                        id == SAND || id == SANDSTONE || id == GRAVEL ||
+                        id == COAL_ORE || id == IRON_ORE || id == GOLD_ORE ||
+                        id == REDSTONE_ORE || id == DIAMOND_ORE || id == CLAY) {
+                        chunk.set(lx, y, lz, AIR);
+                    }
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Fast ores (Alpha levels)
+    // -------------------------------------------------------------------------
     struct OreRule {
         BlockId id;
         uint32_t salt;
@@ -627,12 +548,13 @@ private:
     };
 
     void placeOresForChunk(Chunk& chunk, int baseX, int baseZ) const {
+        // Уровни как в Minecraft Alpha
         static constexpr OreRule rules[] = {
-            { COAL_ORE,     710, 8, 8, 72, 2, 2 },
-            { IRON_ORE,     711, 8, 5, 58, 1, 2 },
-            { GOLD_ORE,     712, 9, 4, 32, 1, 1 },
-            { REDSTONE_ORE, 713, 8, 3, 18, 1, 2 },
-            { DIAMOND_ORE,  714, 10, 3, 16, 1, 1 }
+            { COAL_ORE,     710, 8,  5, 100, 2, 2 },
+            { IRON_ORE,     711, 8,  5,  64, 1, 2 },
+            { GOLD_ORE,     712, 9,  5,  32, 1, 1 },
+            { REDSTONE_ORE, 713, 8,  5,  16, 1, 2 },
+            { DIAMOND_ORE,  714, 10, 5,  16, 1, 1 }
         };
 
         for (const OreRule& rule : rules) {
@@ -640,10 +562,7 @@ private:
         }
     }
 
-    void placeOreRule(Chunk& chunk,
-                      int baseX,
-                      int baseZ,
-                      const OreRule& rule) const {
+    void placeOreRule(Chunk& chunk, int baseX, int baseZ, const OreRule& rule) const {
         int minX = baseX - rule.radius;
         int maxX = baseX + CHUNK_SIZE - 1 + rule.radius;
         int minZ = baseZ - rule.radius;
@@ -660,11 +579,9 @@ private:
         for (int cx = cellMinX; cx <= cellMaxX; ++cx) {
             for (int cz = cellMinZ; cz <= cellMaxZ; ++cz) {
                 for (int cy = yMinCell; cy <= yMaxCell; ++cy) {
-                    uint32_t h = hash3(cx, cy, cz, seed + rule.salt);
-
-                    // Несколько попыток на клетку.
                     for (int attempt = 0; attempt < rule.triesPerCell; ++attempt) {
-                        uint32_t ah = hash3(cx * 31 + attempt, cy * 17, cz * 13, seed + rule.salt + 1000u);
+                        uint32_t ah = hash3(cx * 31 + attempt, cy * 17, cz * 13,
+                                            seed + rule.salt + 1000u);
 
                         int ox = static_cast<int>((ah >> 0)  & 0xFF) * rule.cellSize / 256;
                         int oy = static_cast<int>((ah >> 8)  & 0xFF) * rule.cellSize / 256;
@@ -679,64 +596,51 @@ private:
                         int lx = wx - baseX;
                         int lz = wz - baseZ;
 
-                        // Центр может быть за чанком, но жила должна залезть внутрь.
                         if (lx < -rule.radius || lx >= CHUNK_SIZE + rule.radius) continue;
                         if (lz < -rule.radius || lz >= CHUNK_SIZE + rule.radius) continue;
 
-                        int surf = heightAtUncached(wx, wz);
-                        if (wy >= surf - 4) continue;
+                        // Грубая отсечка: не выше поверхности
+                        float baseH = computeBaseHeight(wx, wz);
+                        if (wy >= baseH + 4) continue;
 
-                        placeOreBlob(chunk, baseX, baseZ, lx, wy, lz, rule.id, rule.radius, ah);
+                        placeOreBlob(chunk, baseX, baseZ, lx, wy, lz,
+                                     rule.id, rule.radius, ah);
                     }
                 }
             }
         }
     }
 
-    void placeOreBlob(Chunk& chunk,
-                      int baseX,
-                      int baseZ,
-                      int centerX,
-                      int centerY,
-                      int centerZ,
-                      BlockId ore,
-                      int radius,
-                      uint32_t h) const {
-        // Маленькая вытянутая жила.
+    void placeOreBlob(Chunk& chunk, int baseX, int baseZ,
+                      int centerX, int centerY, int centerZ,
+                      BlockId ore, int radius, uint32_t h) const {
         int dxLen = radius;
         int dzLen = radius;
         int dyLen = std::max(1, radius - 1);
 
-        if ((h & 1u) != 0u) dxLen += 1;
-        if ((h & 2u) != 0u) dzLen += 1;
+        if ((h & 1u) != 0u) ++dxLen;
+        if ((h & 2u) != 0u) ++dzLen;
 
         for (int dy = -dyLen; dy <= dyLen; ++dy) {
             int y = centerY + dy;
             if (y <= 3 || y >= CHUNK_HEIGHT) continue;
 
             for (int dz = -dzLen; dz <= dzLen; ++dz) {
-                int lx = centerX + dz;
-                if (lx < 0 || lx >= CHUNK_SIZE) continue;
+                int localZ = centerZ + dz;
+                if (localZ < 0 || localZ >= CHUNK_SIZE) continue;
 
                 for (int dx = -dxLen; dx <= dxLen; ++dx) {
                     int localX = centerX + dx;
                     if (localX < 0 || localX >= CHUNK_SIZE) continue;
 
-                    // Ошибка в именах выше не страшна, но лучше явно:
-                    // centerX — local X центра, centerZ — local Z центра.
-                    int localZ = centerZ + dz;
-                    if (localZ < 0 || localZ >= CHUNK_SIZE) continue;
-
                     float nx = static_cast<float>(dx) / std::max(1, dxLen);
                     float ny = static_cast<float>(dy) / std::max(1, dyLen);
                     float nz = static_cast<float>(dz) / std::max(1, dzLen);
-
                     if (nx * nx + ny * ny + nz * nz > 1.0f) continue;
 
                     int wx = baseX + localX;
                     int wz = baseZ + localZ;
 
-                    // Небольшая рваность.
                     uint32_t rh = hash3(wx, y, wz, seed + 800u);
                     if ((rh & 7u) == 0u) continue;
 
@@ -749,19 +653,15 @@ private:
     }
 
     // -------------------------------------------------------------------------
-    // Trees
+    // Trees (Alpha-style: плотный лес, редкие равнины)
     // -------------------------------------------------------------------------
-
-    bool treeCandidate(int cellX,
-                       int cellZ,
+    bool treeCandidate(int cellX, int cellZ,
                        HeightCache& cache,
-                       int& outX,
-                       int& outZ,
-                       int& outSurf,
+                       int& outX, int& outZ, int& outSurf,
                        Biome& outBiome) const {
         uint32_t h = hash3(cellX, 3, cellZ, seed + 600);
 
-        float r = static_cast<float>(h & 0xFFFFu) / 65535.0f;
+        float r  = static_cast<float>(h & 0xFFFFu) / 65535.0f;
         float jx = static_cast<float>((h >> 16) & 0xFF) / 255.0f;
         float jz = static_cast<float>((h >> 24) & 0xFF) / 255.0f;
 
@@ -769,39 +669,23 @@ private:
         int pz = cellZ * TREE_CELL + static_cast<int>(jz * TREE_CELL);
 
         ColumnInfo info = cachedColumn(cache, px, pz);
-
         int surf = info.height;
         Biome biome = info.biome;
 
         float prob = 0.0f;
-
         switch (biome) {
-            case Biome::Forest:
-                prob = 0.72f;
-                break;
-            case Biome::Plains:
-                prob = 0.10f;
-                break;
-            case Biome::Mountains:
-                prob = 0.04f;
-                break;
-            case Biome::Snowy:
-                prob = 0.02f;
-                break;
-            default:
-                prob = 0.0f;
-                break;
+            case Biome::Forest:    prob = 0.80f; break;
+            case Biome::Plains:    prob = 0.08f; break;
+            case Biome::Mountains: prob = 0.03f; break;
+            case Biome::Snowy:     prob = 0.02f; break;
+            default:               prob = 0.0f;  break;
         }
 
         if (r > prob) return false;
         if (surf <= WATER_LEVEL + 1) return false;
         if (surf >= CHUNK_HEIGHT - 12) return false;
 
-        outX = px;
-        outZ = pz;
-        outSurf = surf;
-        outBiome = biome;
-
+        outX = px; outZ = pz; outSurf = surf; outBiome = biome;
         return true;
     }
 
@@ -811,49 +695,26 @@ private:
                lz >= 0 && lz < CHUNK_SIZE;
     }
 
-    void setIfAirOrLeaves(Chunk& chunk,
-                          int lx,
-                          int ly,
-                          int lz,
-                          BlockId id) const {
+    void setIfAirOrLeaves(Chunk& chunk, int lx, int ly, int lz, BlockId id) const {
         if (!inChunk(lx, ly, lz)) return;
-
-        BlockId existing = chunk.get(lx, ly, lz);
-
-        if (existing == AIR || existing == LEAVES) {
-            chunk.set(lx, ly, lz, id);
-        }
+        BlockId e = chunk.get(lx, ly, lz);
+        if (e == AIR || e == LEAVES) chunk.set(lx, ly, lz, id);
     }
 
-    void setLeavesIfAir(Chunk& chunk,
-                        int lx,
-                        int ly,
-                        int lz) const {
+    void setLeavesIfAir(Chunk& chunk, int lx, int ly, int lz) const {
         if (!inChunk(lx, ly, lz)) return;
-
-        if (chunk.get(lx, ly, lz) == AIR) {
-            chunk.set(lx, ly, lz, LEAVES);
-        }
+        if (chunk.get(lx, ly, lz) == AIR) chunk.set(lx, ly, lz, LEAVES);
     }
 
-    void placeTree(Chunk& chunk,
-                   int lx,
-                   int ly,
-                   int lz,
-                   int worldX,
-                   int worldZ,
-                   Biome biome) const {
+    void placeTree(Chunk& chunk, int lx, int ly, int lz,
+                   int worldX, int worldZ, Biome biome) const {
         uint32_t th = hash3(worldX, 5, worldZ, seed + 620);
-
         int trunkH = 4 + static_cast<int>(th % 3);
 
-        if (biome == Biome::Forest && ((th >> 8) & 7u) == 0u) {
-            trunkH += 1;
-        }
+        if (biome == Biome::Forest && ((th >> 8) & 7u) == 0u) ++trunkH;
 
         for (int dy = 0; dy < trunkH; ++dy) {
-            int py = ly + dy;
-            setIfAirOrLeaves(chunk, lx, py, lz, WOOD);
+            setIfAirOrLeaves(chunk, lx, ly + dy, lz, WOOD);
         }
 
         int crownBase = ly + trunkH - 2;
@@ -868,20 +729,12 @@ private:
                     int az = std::abs(dz);
 
                     if (radius == 2 && ax == 2 && az == 2) {
-                        uint32_t cornerHash = hash3(worldX + dx, py, worldZ + dz, seed + 621);
-
-                        if ((cornerHash & 3u) != 0u) {
-                            continue;
-                        }
+                        uint32_t ch = hash3(worldX + dx, py, worldZ + dz, seed + 621);
+                        if ((ch & 3u) != 0u) continue;
                     }
 
-                    if (dy == 3 && ax + az > 1) {
-                        continue;
-                    }
-
-                    if (dx == 0 && dz == 0 && py < ly + trunkH) {
-                        continue;
-                    }
+                    if (dy == 3 && ax + az > 1) continue;
+                    if (dx == 0 && dz == 0 && py < ly + trunkH) continue;
 
                     setLeavesIfAir(chunk, lx + dx, py, lz + dz);
                 }
@@ -891,10 +744,8 @@ private:
         setIfAirOrLeaves(chunk, lx, ly + trunkH - 1, lz, WOOD);
     }
 
-    void placeTreesForChunk(Chunk& chunk,
-                            HeightCache& cache,
-                            int baseX,
-                            int baseZ) const {
+    void placeTreesForChunk(Chunk& chunk, HeightCache& cache,
+                            int baseX, int baseZ) const {
         int minX = baseX - MAX_CANOPY;
         int maxX = baseX + CHUNK_SIZE - 1 + MAX_CANOPY;
         int minZ = baseZ - MAX_CANOPY;
@@ -907,24 +758,12 @@ private:
 
         for (int cx = cellMinX; cx <= cellMaxX; ++cx) {
             for (int cz = cellMinZ; cz <= cellMaxZ; ++cz) {
-                int tx = 0;
-                int tz = 0;
-                int ty = 0;
+                int tx = 0, tz = 0, ty = 0;
                 Biome biome = Biome::Plains;
 
-                if (!treeCandidate(cx, cz, cache, tx, tz, ty, biome)) {
-                    continue;
-                }
+                if (!treeCandidate(cx, cz, cache, tx, tz, ty, biome)) continue;
 
-                placeTree(
-                    chunk,
-                    tx - baseX,
-                    ty,
-                    tz - baseZ,
-                    tx,
-                    tz,
-                    biome
-                );
+                placeTree(chunk, tx - baseX, ty, tz - baseZ, tx, tz, biome);
             }
         }
     }

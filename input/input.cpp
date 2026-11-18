@@ -12,6 +12,7 @@ void Input::onPointerDown(int32_t pointerId, float x, float y,
 
     // Сначала кнопки — они поглощают нажатие.
     if (jumpButton.contains(x, y))  { jumpFlag  = true; return; }
+    if (flyButton.contains(x, y))   { flyFlag   = true; return; }
     if (breakButton.contains(x, y)) { breakFlag = true; return; }
     if (placeButton.contains(x, y)) { placeFlag = true; return; }
 

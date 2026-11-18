@@ -59,19 +59,14 @@ public:
     Screen                  screen = Screen::MainMenu;
     std::vector<MenuButton> buttons;
 
-    // На Android рисуем тач-джойстик и кнопки, на десктопе — нет.
-#ifdef __ANDROID__
-    static constexpr bool kShowTouchControls = true;
-#else
-    static constexpr bool kShowTouchControls = false;
-#endif
-
     void toggleFlying() { if (player) player->toggleFlying(); }
     // ========================================================================
     // debug overlay
     // ========================================================================
+    void toggleTC()           { showTouchControls_ = !showTouchControls_; }
     void toggleDebug()        { showDebug_ = !showDebug_; }
     bool debugVisible() const { return showDebug_; }
+    bool ShowTouchControls() const { return showTouchControls_; }
     void openTeleportCoords() { openTextEntry(TextField::TeleportCoords); }
 
     // ========================================================================
@@ -129,13 +124,16 @@ private:
     TextEntryState textEntry;
 
     // ---- HUD-кнопки ----
-    Rect jumpBtn, breakBtn, placeBtn, pauseBtn;
+    Rect jumpBtn, flyBtn, breakBtn, placeBtn, pauseBtn;
     bool pauseTapActive = false;
 
     // ---- cooldown для held ЛКМ/ПКМ (desktop) ----
     float breakCooldown = 0.0f;
     float placeCooldown = 0.0f;
     static constexpr float ACTION_COOLDOWN = 0.15f;
+
+    // ---- touch overlay ----
+    bool  showTouchControls_   = false;
 
     // ---- debug overlay ----
     bool  showDebug_     = false;

@@ -11,7 +11,7 @@
 
 namespace mc {
 
-constexpr float PI = 3.14159265358979f;
+constexpr float PI = 3.141592653589793f;
 constexpr float DEG2RAD = PI / 180.0f;
 
 struct Vec2 {

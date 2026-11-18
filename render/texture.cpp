@@ -128,7 +128,7 @@ void fillWater(uint8_t* out, int atlasSize, int tileSize, int bx, int by, uint32
             float wave = std::sin((x + y) * 0.6f) * 10.0f;
             int n = static_cast<int>(hash3(x, y, 5, seed) % 11) - 5;
             uint8_t b = static_cast<uint8_t>(std::clamp(160 + static_cast<int>(wave) + n, 0, 255));
-            setPixel(out, atlasSize, bx + x, by + y, 40, 90, b, 180);
+            setPixel(out, atlasSize, bx + x, by + y, 40, 90, b, 100);
         }
     }
 }

@@ -41,6 +41,7 @@ public:
 
     // ===== Регистрация виртуальных кнопок (Android) =====
     void setJumpButton (Rect r) { jumpButton  = r; }
+    void setFlyButton (Rect r) { flyButton  = r; }
     void setBreakButton(Rect r) { breakButton = r; }
     void setPlaceButton(Rect r) { placeButton = r; }
 
@@ -50,6 +51,7 @@ public:
         return keyboardMove;
     }
     Vec2 lookDelta()       { Vec2 d = lookAccum; lookAccum = {}; return d; }
+    bool flyPressed()  { bool v = flyFlag;  flyFlag  = false; return v; }
     bool jumpPressed()  { bool v = jumpFlag;  jumpFlag  = false; return v; }
     bool breakPressed() { bool v = breakFlag; breakFlag = false; return v; }
     bool placePressed() { bool v = placeFlag; placeFlag = false; return v; }
@@ -66,13 +68,13 @@ private:
     Vec2 moveVector{0, 0};      // тач-джойстик
     Vec2 keyboardMove{0, 0};    // WASD
     Vec2 lookAccum{0, 0};
-    bool jumpFlag = false, breakFlag = false, placeFlag = false;
+    bool jumpFlag = false, breakFlag = false, placeFlag = false, flyFlag = false;
     bool breakHold = false, placeHold = false;
     bool jumpHeld_   = false;
     bool crouchHeld_ = false;
     int  hotbar = 1;
 
-    Rect jumpButton, breakButton, placeButton;
+    Rect jumpButton, breakButton, placeButton, flyButton;
 };
 
 } // namespace mc

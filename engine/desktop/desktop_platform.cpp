@@ -270,6 +270,12 @@ void DesktopPlatform::onKey(int key, int /*scancode*/, int action, int /*mods*/)
         }
         return;
     }
+    // ---- F10: TouchControl тумблер (в целях очисти от димона)
+    if (key == GLFW_KEY_F10 && edge) {
+        engine_->toggleTC();
+        LOGI("Touch controls: %s", engine_->ShowTouchControls() ? "ON" : "OFF");
+        return;
+    }
 }
 
 void DesktopPlatform::onChar(unsigned int cp) {
